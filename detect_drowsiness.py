@@ -2,6 +2,8 @@ import cv2
 import mediapipe as mp
 import pygame
 import math
+import speech_recognition as sr
+import threading
 
 # Initialize MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -9,9 +11,9 @@ face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
 
 # Initialize Pygame mixer for alarm
 pygame.mixer.init()
-pygame.mixer.music.load("music.wav")  # Make sure music.wav is in the same folder
+pygame.mixer.music.load("music.wav")  # Ensure this file is in the same folder
 
-# EAR calculation functions
+# EAR calculation
 def euclidean(p1, p2):
     return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
@@ -21,23 +23,41 @@ def calculate_ear(eye_points):
     horizontal = euclidean(eye_points[0], eye_points[3])
     return (vertical1 + vertical2) / (2.0 * horizontal)
 
-# Eye landmark indexes for MediaPipe Face Mesh (LEFT and RIGHT)
+# Landmark indexes for eyes
 LEFT_EYE_INDEXES = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_INDEXES = [362, 385, 387, 263, 373, 380]
 
-# EAR threshold for detecting closed eyes
 EAR_THRESHOLD = 0.25
 counter = 0
 
-# Start video capture
+# Alarm state tracking
+alarm_playing = False
+alarm_lock = threading.Lock()
+
+def stop_alarm():
+    global alarm_playing
+    pygame.mixer.music.stop()
+    with alarm_lock:
+        alarm_playing = False
+
+def voice_command_listener():
+    global alarm_playing
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("[INFO] Listening for 'stop alarm' command...")
+        try:
+            audio = r.listen(source, timeout=5, phrase_time_limit=5)
+            command = r.recognize_google(audio).lower()
+            print(f"[VOICE] Heard: {command}")
+            if "stop" in command or "alarm" in command:
+                stop_alarm()
+        except Exception as e:
+            print(f"[VOICE ERROR] {e}")
+
+# Start webcam
 cap = cv2.VideoCapture(0)
-
-# Frame rate calculation (for 2-second threshold)
-fps = cap.get(cv2.CAP_PROP_FPS)
-if fps == 0 or fps is None:
-    fps = 30  # Fallback if actual FPS is not available
-
-CONSEC_FRAMES = int(fps * 2)  # 2 seconds worth of frames
+fps = cap.get(cv2.CAP_PROP_FPS) or 30
+CONSEC_FRAMES = int(fps * 2)
 
 print(f"[INFO] FPS: {fps:.2f} | CONSEC_FRAMES for 2 sec: {CONSEC_FRAMES}")
 
@@ -46,11 +66,17 @@ while cap.isOpened():
     if not ret:
         break
 
-    # Flip and convert to RGB
+    # Apply night mode enhancement (CLAHE)
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    cl = clahe.apply(l)
+    enhanced_frame = cv2.merge((cl,a,b))
+    frame = cv2.cvtColor(enhanced_frame, cv2.COLOR_LAB2BGR)
+
     frame = cv2.flip(frame, 1)
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # Detect face landmarks
     results = face_mesh.process(rgb_frame)
 
     if results.multi_face_landmarks:
@@ -64,26 +90,27 @@ while cap.isOpened():
         right_ear = calculate_ear(right_eye)
         avg_ear = (left_ear + right_ear) / 2.0
 
-        # Check if eyes are closed
         if avg_ear < EAR_THRESHOLD:
             counter += 1
             if counter >= CONSEC_FRAMES:
-                if not pygame.mixer.music.get_busy():
-                    pygame.mixer.music.play()
-                cv2.putText(frame, "DROWSINESS DETECTED!", (30, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                with alarm_lock:
+                    if not alarm_playing:
+                        pygame.mixer.music.play(-1)
+                        alarm_playing = True
+                        threading.Thread(target=voice_command_listener, daemon=True).start()
+                cv2.putText(frame, "DROWSINESS DETECTED!", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
         else:
             counter = 0
-            pygame.mixer.music.stop()
+            if alarm_playing:
+                pygame.mixer.music.stop()
+                with alarm_lock:
+                    alarm_playing = False
 
-        # Draw eye landmarks
         for point in left_eye + right_eye:
             cv2.circle(frame, point, 2, (0, 255, 0), -1)
 
-    # Show video feed
     cv2.imshow("Driver Drowsiness Detection", frame)
 
-    # ESC to exit
     if cv2.waitKey(1) & 0xFF == 27:
         break
 

@@ -18,8 +18,6 @@ A real-time computer vision system to detect driver drowsiness using eye aspect 
 - pygame
 - scipy
 
----
-
 ## 🚀 How to Run
 
 1. **Clone the repository**
